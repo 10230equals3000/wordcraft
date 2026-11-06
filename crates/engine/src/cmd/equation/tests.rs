@@ -639,3 +639,71 @@ fn a_math_name_is_corrected_by_any_character_that_cannot_continue_it() {
     s.run("equation.type", &json!({"text": r"\alpha+"})).unwrap();
     assert_eq!(linear(&s), r"\alpha+");
 }
+
+/// Insert › Ink Equation recognises a small hand-written string from its strokes and inserts the
+/// same equation as `insert.equation` would.
+#[test]
+fn ink_equation_recognises_strokes_and_inserts_the_equation() {
+    let mut s = session();
+    let line = |from: [f32; 2], to: [f32; 2]| {
+        let n = 24;
+        let pts: Vec<serde_json::Value> = (0..=n)
+            .map(|i| {
+                let t = i as f32 / n as f32;
+                json!([from[0] + t * (to[0] - from[0]), from[1] + t * (to[1] - from[1])])
+            })
+            .collect();
+        json!({"points": pts})
+    };
+    let circle = |cx: f32, cy: f32, r: f32| {
+        let n = 40;
+        let pts: Vec<serde_json::Value> = (0..=n)
+            .map(|i| {
+                let a = std::f32::consts::TAU * i as f32 / n as f32;
+                json!([cx + r * a.cos(), cy + r * a.sin()])
+            })
+            .collect();
+        json!({"points": pts})
+    };
+    let strokes = json!([
+        line([0.0, 10.0], [0.0, 40.0]),
+        line([14.0, 25.0], [30.0, 25.0]),
+        line([40.0, 10.0], [40.0, 40.0]),
+        line([50.0, 22.0], [66.0, 22.0]),
+        line([50.0, 30.0], [66.0, 30.0]),
+        circle(80.0, 25.0, 12.0),
+    ]);
+    let r = s.run("insert.inkEquation", &json!({"strokes": strokes})).unwrap();
+    assert_eq!(r["linear"], "1-1=0");
+    assert_eq!(linear(&s), "1-1=0");
+    assert!(s.run("insert.inkEquation", &json!({"strokes": []})).is_err(), "nothing to recognise");
+    assert!(s.run("insert.inkEquation", &json!({"strokes": [{"points": [[0, 0], [2, 3], [5, 1]]}]})).is_err(), "a scribble stays ink");
+}
+
+#[test]
+fn ink_equation_rejects_incomplete_or_over_budget_input_without_replacing_selection() {
+    let mut s = session();
+    s.run("document.setText", &json!({"text": "keep this"})).unwrap();
+    s.run("select.all", &json!({})).unwrap();
+    let before = s.doc.clone();
+    let selection = s.sel.clone();
+    let line = json!({"points": [[0, 0], [0, 20]]});
+    let bad_inputs = [
+        json!({"strokes": [line, {"points": [[20, 10]]}]}), // a tap is not silently dropped
+        json!({"strokes": [{"points": [[0, 0], [0, 20]]}, {}]}),
+        json!({"strokes": [{"points": [[0, 0], ["bad", 1], [0, 20]]}]}),
+        json!({"strokes": [{"points": [[0, 0], [1.0e10, 20]]}]}),
+        json!({"strokes": [{"points": vec![[0, 0]; MAX_POINTS + 1]}]}),
+        json!({"strokes": vec![json!({"points": [[0, 0], [0, 20]]}); ink_math::MAX_STROKES + 1]}),
+        json!({"strokes": vec![json!({"points": vec![[0, 0]; MAX_POINTS]}); ink_math::MAX_TOTAL_POINTS / MAX_POINTS + 1]}),
+    ];
+    for input in bad_inputs {
+        assert!(s.run("insert.inkEquation", &input).is_err());
+        assert_eq!(s.doc, before);
+        assert_eq!(s.sel, selection);
+    }
+    let div = json!({"strokes": [
+        {"points": [[10, 25], [30, 25]]}, {"points": [[20, 18]]}, {"points": [[20, 32]]}
+    ]});
+    assert_eq!(s.run("insert.inkEquation", &div).unwrap()["linear"], "÷", "taps can be part of a division sign");
+}

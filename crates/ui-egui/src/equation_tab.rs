@@ -210,6 +210,10 @@ pub fn builtin_menu(ui: &mut Ui, app: &mut WordApp) {
         app.canvas.want_focus = true;
         ui.close();
     }
+    if ui.add_enabled(crate::widgets::enabled(app, "insert.inkEquation"), egui::Button::new(tl!("Ink Equation"))).clicked() {
+        let _ = app.run("insert.inkEquation", json!({}));
+        ui.close();
+    }
 }
 
 /// Insert › Symbols › Equation: a split button (insert a new equation, or pick a ready-made one).

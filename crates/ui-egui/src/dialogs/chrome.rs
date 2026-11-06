@@ -151,6 +151,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
     };
     let mut close = false;
     let title = match &d {
+        Dialog::InkEquation { .. } => "Ink Equation",
         Dialog::RenameDocument { .. } => "Rename Document",
         Dialog::Font { .. } => "Font",
         Dialog::Paragraph { .. } => "Paragraph",

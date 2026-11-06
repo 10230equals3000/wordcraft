@@ -441,3 +441,132 @@ fn add_pen_validates_and_saved_galleries_drop_junk() {
     let back: super::DrawState = serde_json::from_value(serde_json::to_value(&d).unwrap()).unwrap();
     assert_eq!(back.pens, d.pens);
 }
+
+fn line_pts(from: [f32; 2], to: [f32; 2]) -> Vec<[f32; 2]> {
+    let n = 24;
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            [from[0] + t * (to[0] - from[0]), from[1] + t * (to[1] - from[1])]
+        })
+        .collect()
+}
+
+fn circle_pts(cx: f32, cy: f32, r: f32) -> Vec<[f32; 2]> {
+    let n = 40;
+    (0..=n)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / n as f32;
+            [cx + r * a.cos(), cy + r * a.sin()]
+        })
+        .collect()
+}
+
+/// Draw › Ink to Math reads the lasso-selected strokes as math and replaces them with one
+/// equation, in one undo step.
+#[test]
+fn ink_to_math_turns_selected_strokes_into_an_equation() {
+    let mut s = session();
+    for pts in [
+        line_pts([100.0, 80.0], [100.0, 110.0]),  // 1
+        line_pts([114.0, 95.0], [130.0, 95.0]),   // -
+        line_pts([140.0, 80.0], [140.0, 110.0]),  // 1
+        line_pts([150.0, 92.0], [166.0, 92.0]),   // = (top)
+        line_pts([150.0, 100.0], [166.0, 100.0]), // = (bottom)
+        circle_pts(180.0, 95.0, 12.0),            // 0
+    ] {
+        s.run("draw.stroke", &json!({"page": 0, "points": pts})).unwrap();
+    }
+    let r = s.run("draw.lasso", &json!({"page": 0, "points": [[80, 60], [220, 60], [220, 130], [80, 130]]})).unwrap();
+    assert_eq!(r["count"], 6);
+    let r = s.run("draw.inkToMath", &json!({})).unwrap();
+    assert_eq!(r["linear"], "1-1=0");
+    assert!(ink(&s).is_empty(), "the recognised strokes are gone");
+    let eq = s.doc.body.iter().filter_map(|b| b.as_para()).flat_map(|p| p.objects.iter()).find_map(|o| match o {
+        InlineObject::Equation { linear, .. } => Some(linear.clone()),
+        _ => None,
+    });
+    assert_eq!(eq.as_deref(), Some("1-1=0"));
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(ink(&s).len(), 6, "one undo step restores the ink and removes the equation");
+    assert!(s.doc.body.iter().filter_map(|b| b.as_para()).flat_map(|p| p.objects.iter()).all(|o| !matches!(o, InlineObject::Equation { .. })));
+}
+
+#[test]
+fn ink_to_math_without_a_selection_asks_for_ink() {
+    let mut s = session();
+    assert!(s.run("draw.inkToMath", &json!({})).is_err());
+}
+
+#[test]
+fn ink_to_math_keeps_unrecognised_selected_strokes() {
+    let mut s = session();
+    s.run("draw.stroke", &json!({"page": 0, "points": line_pts([100.0, 80.0], [100.0, 110.0])})).unwrap();
+    s.run("draw.stroke", &json!({"page": 0, "points": [[120.0, 90.0]]})).unwrap();
+    s.run("draw.lasso", &json!({"page": 0, "points": [[80, 60], [160, 60], [160, 130], [80, 130]]})).unwrap();
+    assert_eq!(ink(&s).len(), 2);
+
+    assert!(s.run("draw.inkToMath", &json!({})).is_err(), "the tap must prevent partial recognition");
+    assert_eq!(ink(&s).len(), 2, "failed recognition must not delete any selected ink");
+    assert!(s.doc.body.iter().filter_map(|b| b.as_para()).flat_map(|p| p.objects.iter()).all(|o| !matches!(o, InlineObject::Equation { .. })));
+}
+
+#[test]
+fn ink_to_math_exits_the_previous_equation_editing_session() {
+    let mut s = Session::new(wordcraft_doc::Document::new());
+    s.run("insert.equation", &json!({"linear": "x", "edit": false})).unwrap();
+    s.run("draw.stroke", &json!({"page": 0, "points": [[100, 80], [100, 110]]})).unwrap();
+    s.sel = crate::Selection::caret(wordcraft_doc::Pos::body(0, wordcraft_doc::para::OBJ.len_utf8()));
+    s.run("equation.edit", &json!({})).unwrap();
+    s.run("draw.lasso", &json!({"page": 0, "points": [[80, 60], [120, 60], [120, 130], [80, 130]]})).unwrap();
+    assert_eq!(s.run("draw.inkToMath", &json!({})).unwrap()["linear"], "1");
+    assert!(s.math.is_none(), "typing must not remain attached to the old equation");
+    assert!(s.run("equation.type", &json!({"text": "a"})).is_err());
+    let equations: Vec<_> = s
+        .doc
+        .body
+        .iter()
+        .filter_map(|b| b.as_para())
+        .flat_map(|p| p.objects.iter())
+        .filter_map(|o| match o {
+            InlineObject::Equation { linear, .. } => Some(linear.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(equations, ["1", "x"]);
+}
+
+#[test]
+fn ink_to_math_preserves_a_fraction_with_a_multi_symbol_numerator() {
+    let mut s = Session::new(wordcraft_doc::Document::new());
+    for pts in [
+        line_pts([107.0, 80.0], [107.0, 115.0]),
+        line_pts([115.0, 97.0], [125.0, 97.0]),
+        line_pts([120.0, 85.0], [120.0, 110.0]),
+        line_pts([135.0, 80.0], [135.0, 115.0]),
+        line_pts([100.0, 130.0], [180.0, 130.0]),
+        line_pts([125.0, 150.0], [125.0, 185.0]),
+        line_pts([145.0, 150.0], [145.0, 185.0]),
+    ] {
+        s.run("draw.stroke", &json!({"page": 0, "points": pts})).unwrap();
+    }
+    let selected = s.run("draw.lasso", &json!({"page": 0, "points": [[80, 60], [200, 60], [200, 200], [80, 200]]})).unwrap();
+    assert_eq!(selected["count"], 7);
+    assert_eq!(s.run("draw.inkToMath", &json!({})).unwrap()["linear"], "(1+1)/11");
+    let math = s
+        .doc
+        .body
+        .iter()
+        .filter_map(|b| b.as_para())
+        .flat_map(|p| p.objects.iter())
+        .find_map(|o| match o {
+            InlineObject::Equation { math, .. } => Some(math),
+            _ => None,
+        })
+        .unwrap();
+    let [wordcraft_doc::math::MNode::Frac { num, den, .. }] = math.nodes.as_slice() else { panic!("wrong fraction: {:?}", math.nodes) };
+    assert_eq!(wordcraft_doc::math::to_linear(num), "1+1");
+    assert_eq!(wordcraft_doc::math::to_linear(den), "11");
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(ink(&s).len(), 7);
+}

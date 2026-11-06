@@ -3,12 +3,14 @@
 //! form, inline/display, justification and equation numbers.
 
 use serde_json::{Value, json};
+use wordcraft_doc::freeform::MAX_POINTS;
 use wordcraft_doc::math::{Arg, MNode, Math, MathJc, parse_linear, to_linear};
 use wordcraft_doc::math_edit::{self as me, MathPos, TypeStyle};
 use wordcraft_doc::math_latex::{parse_latex, to_latex};
 use wordcraft_doc::para::OBJ;
 use wordcraft_doc::{InlineObject, Pos};
 
+use super::ink_math;
 use super::{delete_selection, sel_result, split_para};
 use crate::{CmdError, CmdResult, CommandSpec, ImeEditOutcome, MathEdit, Selection, Session, p};
 
@@ -28,6 +30,8 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("insert.equation", "Equation", "Insert › Symbols", insert)
             .key("Alt+=")
             .params(r#"{"linear"?: string, "latex"?: string, "builtin"?: "pythagoras|area|quadratic|binomial|expansion|euler|derivative|taylor|gaussian|fourier|trig1|trig2|normal|bayes", "display"?: bool, "edit"?: bool (default true)}"#),
+        CommandSpec::new("insert.inkEquation", "Ink Equation", "Insert › Symbols", insert_ink)
+            .params(r#"{"strokes": [{"points": [[x, y], …]}, …] (page points), "display"?: bool, "edit"?: bool (default true)}"#),
         CommandSpec::new("equation.edit", "Edit Equation", "Equation", edit)
             .pure()
             .when(near_equation)
@@ -219,6 +223,52 @@ fn insert(s: &mut Session, v: &Value) -> CmdResult {
         None => parse_linear(selected.trim()),
     };
     insert_nodes_as_equation(s, nodes, v)
+}
+
+/// Insert › Symbols › Ink Equation: recognise the hand-drawn strokes and insert the equation at
+/// the caret, deleting the current selection as [`insert`] would.
+fn insert_ink(s: &mut Session, v: &Value) -> CmdResult {
+    let strokes = ink_params(v)?;
+    let Some(linear) = ink_math::recognise(&strokes) else {
+        return Err(CmdError::Failed("the ink doesn't look like math".into()));
+    };
+    insert_nodes_as_equation(s, parse_linear(&linear), v)
+}
+
+/// `strokes` as page-point polylines. Reject malformed or over-budget input rather than
+/// silently turning a partial drawing into an equation.
+fn ink_params(v: &Value) -> Result<Vec<ink_math::Stroke>, CmdError> {
+    let list =
+        v.get("strokes").and_then(Value::as_array).ok_or_else(|| CmdError::Params("`strokes` ([{points: [[x, y], …]}, …]) is required".into()))?;
+    if list.is_empty() || list.len() > ink_math::MAX_STROKES {
+        return Err(CmdError::Params(format!("`strokes` must contain 1 to {} strokes", ink_math::MAX_STROKES)));
+    }
+    let mut out = Vec::with_capacity(list.len());
+    let mut total = 0usize;
+    for item in list {
+        let points = item.get("points").and_then(Value::as_array).ok_or_else(|| CmdError::Params("each stroke needs a `points` array".into()))?;
+        if points.is_empty() || points.len() > MAX_POINTS {
+            return Err(CmdError::Params(format!("each stroke needs 1 to {MAX_POINTS} points")));
+        }
+        total = total.saturating_add(points.len());
+        if total > ink_math::MAX_TOTAL_POINTS {
+            return Err(CmdError::Params(format!("at most {} ink points are allowed", ink_math::MAX_TOTAL_POINTS)));
+        }
+        let mut pts = Vec::with_capacity(points.len());
+        for pt in points {
+            let a = pt.as_array().ok_or_else(|| CmdError::Params("each ink point needs two coordinates".into()))?;
+            let (Some(x), Some(y)) = (a.first().and_then(Value::as_f64), a.get(1).and_then(Value::as_f64)) else {
+                return Err(CmdError::Params("each ink point needs two numeric coordinates".into()));
+            };
+            let (x, y) = (x as f32, y as f32);
+            if !x.is_finite() || !y.is_finite() || x.abs() > ink_math::MAX_COORD || y.abs() > ink_math::MAX_COORD {
+                return Err(CmdError::Params("ink coordinates are outside the supported range".into()));
+            }
+            pts.push([x, y]);
+        }
+        out.push(ink_math::Stroke { pts });
+    }
+    Ok(out)
 }
 
 /// Clears any editing session, deletes the selection, creates an equation object (display on an

@@ -12,6 +12,7 @@ use super::{Dialog, MeasureExt, Tokens, Ui, Value, WordApp, json, semibold, vec2
 /// Returns true to close.
 pub(super) fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     match d {
+        Dialog::InkEquation { form } => super::ink_equation::body(app, ui, form),
         Dialog::RenameDocument { .. } => rename_document_dialog(app, ui, d),
         Dialog::Font { .. } => font_dialog(app, ui, d),
         Dialog::Paragraph { .. } => paragraph_dialog(app, ui, d),

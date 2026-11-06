@@ -16,15 +16,17 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use wordcraft_doc::freeform::{FreePath, Freeform, InkTool, MAX_INK_PER_PAGE, MAX_POINTS};
+use wordcraft_doc::math::{Math, parse_linear, to_linear};
 use wordcraft_doc::para::{Anchor, Float, InlineObject, OBJ, ShapeKind, Wrap};
 use wordcraft_doc::props::Rgb;
 use wordcraft_doc::{CharProps, Pos, StoryRef};
 use wordcraft_geom::Rect;
 use wordcraft_layout::{DocLayout, Placed};
 
+use super::ink_math;
 use super::ink_shape::{ArrowParts, InkShape, arrow_parts, pair_parts, recognise};
 use super::pos_json;
-use crate::{CmdError, CmdResult, CommandSpec, Session, p};
+use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
 mod page_objects;
 use page_objects::PageObjects;
@@ -254,6 +256,8 @@ pub fn specs() -> Vec<CommandSpec> {
         .params(r#"{"value"?: bool}  (no value: convert the lasso-selected strokes, or turn Ink to Shape on or off)"#)
         .pure(),
         CommandSpec::new("draw.convertInk", "Convert to Shapes", "Draw › Convert", convert_selection),
+        CommandSpec::new("draw.inkToMath", "Ink to Math", "Draw › Convert", ink_to_math).pure(),
+        CommandSpec::new("draw.convertInkToMath", "Convert Ink to Math", "Draw › Convert", convert_in_to_math),
         CommandSpec::new("draw.replay", "Ink Replay", "Draw › Replay", replay)
             .params(r#"{"value"?: bool}  (starts or stops Ink Replay; returns the strokes in the order they were drawn)"#)
             .pure(),
@@ -746,6 +750,92 @@ fn convert_selection(s: &mut Session, _: &Value) -> CmdResult {
     let converted: Vec<Value> = converted.iter().map(|(p, name)| json!({"pos": pos_json(&after_deleting(p, &heads)), "shape": name})).collect();
     keep_lasso(s, LassoSelection { items, ..sel });
     Ok(json!({"count": converted.len(), "converted": converted}))
+}
+
+/// Turn the lasso-selected strokes into an equation, if they read as math left to right (one
+/// undo step). The equation replaces the ink in the text it was anchored to; the selection is
+/// left as a caret after it.
+fn convert_in_to_math(s: &mut Session, _: &Value) -> CmdResult {
+    // Deletions happen at several positions before the equation is inserted. If any mutation
+    // fails, restore the entire edit so callers never observe a partly converted selection.
+    let snapshot = s.edit_snapshot();
+    match convert_in_to_math_inner(s) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            s.restore(snapshot);
+            Err(error)
+        }
+    }
+}
+
+fn convert_in_to_math_inner(s: &mut Session) -> CmdResult {
+    let sel = lasso_required(s)?;
+    let layout = s.layout();
+    let strokes = ink_on(s, &layout, sel.page).into_iter().filter(|k| sel.items.iter().any(|p| p == &k.pos)).collect::<Vec<_>>();
+    // Only unturned, single-path pen and pencil strokes join the math; the rest stay ink (and
+    // are not deleted).
+    let mut inputs: Vec<ink_math::Stroke> = Vec::new();
+    let mut total_points = 0usize;
+    let mut used: Vec<Pos> = Vec::new();
+    let mut anchor: Option<Pos> = None;
+    for k in &strokes {
+        let Some(tool) = k.freeform.ink else { continue };
+        if s.view.hide_ink || !matches!(tool, InkTool::Pen | InkTool::Pencil) || !k.spin.is_identity() {
+            continue;
+        }
+        let paths = k.paths();
+        if paths.len() != 1 {
+            continue;
+        }
+        let Some(pts) = paths.into_iter().next() else { continue };
+        total_points = total_points.saturating_add(pts.len());
+        if inputs.len() >= ink_math::MAX_STROKES || total_points > ink_math::MAX_TOTAL_POINTS {
+            return Err(CmdError::Failed("too much ink to recognise as one equation".into()));
+        }
+        inputs.push(ink_math::Stroke { pts });
+        used.push(k.pos.clone());
+        anchor = Some(match anchor {
+            Some(a) if a <= k.pos => a,
+            _ => k.pos.clone(),
+        });
+    }
+    if inputs.is_empty() {
+        return Err(CmdError::Failed("nothing selected can become an equation".into()));
+    }
+    let Some(recognised) = ink_math::recognise(&inputs) else {
+        return Err(CmdError::Failed("the ink doesn't look like math".into()));
+    };
+    let Some(anchor) = anchor else {
+        return Err(CmdError::Failed("nothing selected can become an equation".into()));
+    };
+    // Delete the converted strokes last-to-first so the earlier positions stay put.
+    used.sort();
+    used.dedup();
+    for pos in used.iter().rev() {
+        delete_object(s, pos)?;
+    }
+    let nodes = parse_linear(&recognised);
+    let linear = to_linear(&nodes);
+    let obj = InlineObject::Equation { linear: linear.clone(), display: false, math: Math { nodes, ..Default::default() } };
+    let props = s.typing_props();
+    let end = s.doc.insert_object(&anchor, obj, &props)?;
+    // The new caret is outside equation editing; leaving the old session active would route
+    // subsequent typing into a different equation.
+    s.math = None;
+    s.sel = Selection::caret(end);
+    s.view.draw.lasso = None;
+    Ok(json!({"linear": linear, "pos": pos_json(&anchor)}))
+}
+
+/// Draw › Ink to Math: convert the lasso-selected ink, falling back to an error when nothing is
+/// selected (there is no Ink to Math mode to toggle).
+fn ink_to_math(s: &mut Session, _: &Value) -> CmdResult {
+    let ink_selected = lasso_selection(s)
+        .is_some_and(|l| l.items.iter().any(|pos| s.doc.para_at(pos).and_then(|p| p.object_at(pos.off)).and_then(InlineObject::ink).is_some()));
+    if ink_selected {
+        return s.run("draw.convertInkToMath", &json!({}));
+    }
+    Err(CmdError::Failed("select the ink to convert to math".into()))
 }
 
 /// Where `pos` is once the objects at `deleted` (none of them `pos`) are gone.

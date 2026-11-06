@@ -25,6 +25,7 @@ mod dispatch;
 mod find;
 mod font;
 mod forms;
+mod ink_equation;
 mod mailings;
 mod page_setup;
 mod paragraph;
@@ -44,6 +45,7 @@ use font::{east_asian_char, font_props};
 #[cfg(test)]
 use forms::custom_value_preview;
 pub use forms::{CellMarginsForm, CustomPropertiesForm, TableForm, table_grid_picker};
+pub use ink_equation::InkEquationForm;
 pub use mailings::{ADDRESS_PARTS, FilterRow, NEW_LIST_FIELDS, RecipientFilter, recipient_table, rule_params};
 #[cfg(test)]
 pub(crate) use mailings::{hold_rows, merge_order, recipient_list, visible_recipients};
@@ -57,6 +59,9 @@ use paragraph::{para_fields, paragraph_dialog};
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "dialog", rename_all = "camelCase")]
 pub enum Dialog {
+    InkEquation {
+        form: Box<InkEquationForm>,
+    },
     RenameDocument {
         name: String,
         message: String,
@@ -497,6 +502,7 @@ impl Dialog {
 
     pub fn name(&self) -> &'static str {
         match self {
+            Dialog::InkEquation { .. } => "inkEquation",
             Dialog::RenameDocument { .. } => "renameDocument",
             Dialog::Font { .. } => "font",
             Dialog::Paragraph { .. } => "paragraph",
@@ -575,6 +581,9 @@ impl Dialog {
     }
 
     pub fn open(name: &str, app: &mut WordApp) -> Option<Dialog> {
+        if name == "inkEquation" {
+            return Some(Dialog::InkEquation { form: Box::default() });
+        }
         if let Some(d) = crate::dialogs_insert::open(name, app) {
             return Some(Dialog::Insert(Box::new(d)));
         }

@@ -954,6 +954,7 @@ fn input_dialog_mailings(id: &str, params: &Value) -> Option<&'static str> {
 
 fn input_dialog_insert(id: &str, params: &Value) -> Option<&'static str> {
     match id {
+        "insert.inkEquation" if !has_value(params, "strokes") => Some("inkEquation"),
         "insert.symbol" if !has_value(params, "char") => Some("symbol"),
         "insert.field" if !has_value(params, "instr") => Some("field"),
         "insert.smartArt" if !has_value(params, "layout") && !has_value(params, "items") => Some("insertSmartArt"),
